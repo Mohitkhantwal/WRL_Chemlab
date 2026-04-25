@@ -1,39 +1,45 @@
 """
 Referral Assay Laboratory (RAL) - Laboratory Information Management System (LIMS)
-A complete, mobile-responsive Streamlit web application for laboratory sample management,
-testing, and report generation.
+Production-Ready Streamlit Application
+
+TECH STACK:
+- Frontend: Streamlit (Mobile responsive)
+- Database: Google Sheets API (gspread and oauth2client)
+- Image Storage: Google Drive API (google-api-python-client)
+- Document Parsing/OCR: Gemini API (google-generativeai)
+- PDF Generation: fpdf
 
 REQUIREMENTS.TXT:
 streamlit==1.28.1
-gspread==5.10.0
+gspread==5.12.0
 oauth2client==4.1.3
-google-api-python-client==2.99.0
-google-generativeai==0.3.0
-google-auth-oauthlib==1.1.0
+google-api-python-client==2.100.0
+google-auth==2.25.2
+google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
+google-generativeai==0.3.0
 fpdf==1.7.2
+pdf2image==1.16.3
 python-dotenv==1.0.0
-Pillow==10.0.0
-
-Deployment: Deploy on Streamlit Cloud with secrets configured in .streamlit/secrets.toml
+Pillow==10.1.0
 """
 
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from google.oauth2.service_account import Credentials
-from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
 import google.generativeai as genai
 from fpdf import FPDF
-import io
 import json
+import io
 import base64
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional, Tuple
 import pandas as pd
 from PIL import Image
+import os
 
 # ============================================================================
 # PAGE CONFIGURATION & INITIALIZATION
@@ -45,152 +51,278 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
     menu_items={
-        "About": "Referral Assay Laboratory - LIMS v1.0"
+        "About": "Referral Assay Laboratory (RAL) - Laboratory Information Management System",
+        "Get Help": "Contact: admin@ral-lab.com"
     }
 )
 
 # Custom CSS for mobile responsiveness
 st.markdown("""
     <style>
-    @media (max-width: 768px) {
-        .main {
-            padding: 0px;
+        @media (max-width: 768px) {
+            .main {
+                padding: 0.5rem 0;
+            }
+            .stButton > button {
+                width: 100%;
+            }
+            .stSelectbox, .stTextInput, .stNumberInput {
+                width: 100%;
+            }
         }
-        .stCameraInput {
-            width: 100%;
+        .header-title {
+            text-align: center;
+            color: #1f77b4;
+            font-size: 2.5rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
         }
-    }
-    .stButton > button {
-        width: 100%;
-    }
-    .stDataFrame {
-        width: 100%;
-    }
+        .subheader {
+            text-align: center;
+            color: #555;
+            font-size: 1rem;
+            margin-bottom: 2rem;
+        }
+        .success-box {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            border-radius: 5px;
+            padding: 1rem;
+            margin: 1rem 0;
+            color: #155724;
+        }
+        .error-box {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            border-radius: 5px;
+            padding: 1rem;
+            margin: 1rem 0;
+            color: #721c24;
+        }
+        .info-box {
+            background-color: #d1ecf1;
+            border: 1px solid #bee5eb;
+            border-radius: 5px;
+            padding: 1rem;
+            margin: 1rem 0;
+            color: #0c5460;
+        }
     </style>
     """, unsafe_allow_html=True)
 
 # ============================================================================
-# GOOGLE SHEETS & DRIVE API INITIALIZATION
+# GOOGLE SHEETS & DRIVE AUTHENTICATION
 # ============================================================================
 
 @st.cache_resource
-def init_gspread_client():
-    """Initialize Google Sheets client with service account credentials."""
+def get_google_credentials():
+    """Retrieve Google Service Account credentials from Streamlit secrets."""
     try:
-        creds_dict = st.secrets["google_sheets"]["credentials"]
-        scope = ['https://spreadsheets.google.com/auth', 
-                 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scopes=scope)
-        client = gspread.authorize(creds)
+        service_account_info = st.secrets["google_service_account"]
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=[
+                'https://www.googleapis.com/auth/spreadsheets',
+                'https://www.googleapis.com/auth/drive'
+            ]
+        )
+        return credentials
+    except Exception as e:
+        st.error(f"❌ Failed to load Google credentials: {str(e)}")
+        st.error("Please configure .streamlit/secrets.toml with your Google Service Account credentials.")
+        st.stop()
+
+@st.cache_resource
+def get_gspread_client():
+    """Create and return an authenticated gspread client."""
+    try:
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        service_account_info = st.secrets["google_service_account"]
+        credentials = ServiceAccountCredentials.from_json_keyfile_dict(
+            service_account_info,
+            scopes=scope
+        )
+        client = gspread.authorize(credentials)
         return client
     except Exception as e:
-        st.error(f"Failed to initialize Google Sheets client: {str(e)}")
-        return None
+        st.error(f"❌ Failed to authenticate gspread: {str(e)}")
+        st.stop()
 
 @st.cache_resource
-def init_drive_client():
-    """Initialize Google Drive client with service account credentials."""
+def get_drive_service():
+    """Create and return an authenticated Google Drive service."""
     try:
-        creds_dict = st.secrets["google_sheets"]["credentials"]
-        credentials = Credentials.from_service_account_info(
-            creds_dict,
-            scopes=['https://www.googleapis.com/auth/drive']
-        )
-        return build('drive', 'v3', credentials=credentials)
+        credentials = get_google_credentials()
+        drive_service = build('drive', 'v3', credentials=credentials)
+        return drive_service
     except Exception as e:
-        st.error(f"Failed to initialize Google Drive client: {str(e)}")
-        return None
+        st.error(f"❌ Failed to initialize Drive service: {str(e)}")
+        st.stop()
 
 @st.cache_resource
-def init_gemini_client():
-    """Initialize Gemini API client."""
+def get_sheets_service():
+    """Create and return an authenticated Google Sheets service."""
     try:
-        api_key = st.secrets["gemini"]["api_key"]
-        genai.configure(api_key=api_key)
-        return genai.GenerativeModel('gemini-pro-vision')
+        credentials = get_google_credentials()
+        sheets_service = build('sheets', 'v4', credentials=credentials)
+        return sheets_service
     except Exception as e:
-        st.error(f"Failed to initialize Gemini client: {str(e)}")
+        st.error(f"❌ Failed to initialize Sheets service: {str(e)}")
+        st.stop()
+
+# ============================================================================
+# GEMINI API INITIALIZATION
+# ============================================================================
+
+def initialize_gemini():
+    """Initialize Gemini API with the API key from Streamlit secrets."""
+    try:
+        gemini_api_key = st.secrets.get("gemini_api_key")
+        if not gemini_api_key:
+            st.error("❌ Gemini API key not found in secrets. Please configure .streamlit/secrets.toml")
+            st.stop()
+        genai.configure(api_key=gemini_api_key)
+    except Exception as e:
+        st.error(f"❌ Failed to initialize Gemini API: {str(e)}")
+        st.stop()
+
+# ============================================================================
+# GOOGLE SHEETS DATABASE OPERATIONS
+# ============================================================================
+
+def get_spreadsheet():
+    """Fetch and return the Google Spreadsheet object."""
+    try:
+        client = get_gspread_client()
+        spreadsheet_id = st.secrets.get("spreadsheet_id")
+        if not spreadsheet_id:
+            st.error("❌ Spreadsheet ID not found in secrets.")
+            st.stop()
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        return spreadsheet
+    except Exception as e:
+        st.error(f"❌ Failed to access spreadsheet: {str(e)}")
+        st.stop()
+
+def append_to_samples_sheet(sample_id: str, is_code: str, raw_ocr_text: str) -> bool:
+    """Append a new row to the 'Samples' worksheet."""
+    try:
+        spreadsheet = get_spreadsheet()
+        samples_sheet = spreadsheet.worksheet("Samples")
+        
+        date_added = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_row = [sample_id, is_code, date_added, raw_ocr_text]
+        
+        samples_sheet.append_row(new_row)
+        return True
+    except Exception as e:
+        st.error(f"❌ Error appending to Samples sheet: {str(e)}")
+        return False
+
+def get_pending_samples() -> List[str]:
+    """Fetch all Sample IDs from the 'Samples' worksheet."""
+    try:
+        spreadsheet = get_spreadsheet()
+        samples_sheet = spreadsheet.worksheet("Samples")
+        all_data = samples_sheet.get_all_records()
+        
+        sample_ids = [row.get("Sample_ID") for row in all_data if row.get("Sample_ID")]
+        return sorted(list(set(sample_ids)))
+    except Exception as e:
+        st.error(f"❌ Error fetching samples: {str(e)}")
+        return []
+
+def get_sample_is_code(sample_id: str) -> Optional[str]:
+    """Retrieve the IS_Code for a given Sample_ID."""
+    try:
+        spreadsheet = get_spreadsheet()
+        samples_sheet = spreadsheet.worksheet("Samples")
+        all_data = samples_sheet.get_all_records()
+        
+        for row in all_data:
+            if row.get("Sample_ID") == sample_id:
+                return row.get("IS_Code")
+        return None
+    except Exception as e:
+        st.error(f"❌ Error fetching IS_Code: {str(e)}")
         return None
 
-# Initialize clients
-gspread_client = init_gspread_client()
-drive_client = init_drive_client()
-gemini_model = init_gemini_client()
-
-# ============================================================================
-# GOOGLE SHEETS HELPER FUNCTIONS
-# ============================================================================
-
-def get_sheet_data(sheet_name: str, worksheet_name: str) -> pd.DataFrame:
-    """Fetch data from a specific Google Sheet worksheet."""
+def get_parameters_for_is_code(is_code: str) -> List[Dict]:
+    """Fetch all test parameters for a given IS_Code."""
     try:
-        if not gspread_client:
-            st.error("Google Sheets client not initialized")
-            return pd.DataFrame()
+        spreadsheet = get_spreadsheet()
+        parameters_sheet = spreadsheet.worksheet("IS_Parameters")
+        all_data = parameters_sheet.get_all_records()
         
-        sheet = gspread_client.open(sheet_name)
-        worksheet = sheet.worksheet(worksheet_name)
-        data = worksheet.get_all_values()
-        
-        if len(data) == 0:
-            return pd.DataFrame()
-        
-        headers = data[0]
-        rows = data[1:]
-        df = pd.DataFrame(rows, columns=headers)
-        return df
+        parameters = [row for row in all_data if row.get("IS_Code") == is_code]
+        return parameters
     except Exception as e:
-        st.error(f"Error fetching data from {worksheet_name}: {str(e)}")
-        return pd.DataFrame()
+        st.error(f"❌ Error fetching parameters: {str(e)}")
+        return []
 
-def append_to_sheet(sheet_name: str, worksheet_name: str, row_data: List) -> bool:
-    """Append a new row to a Google Sheet worksheet."""
+def append_to_test_results(result_id: str, sample_id: str, parameter_id: str, 
+                           result_value: str, conformity: str, image_drive_link: str = "") -> bool:
+    """Append a new row to the 'Test_Results' worksheet."""
     try:
-        if not gspread_client:
-            st.error("Google Sheets client not initialized")
-            return False
+        spreadsheet = get_spreadsheet()
+        test_results_sheet = spreadsheet.worksheet("Test_Results")
         
-        sheet = gspread_client.open(sheet_name)
-        worksheet = sheet.worksheet(worksheet_name)
-        worksheet.append_row(row_data)
+        new_row = [result_id, sample_id, parameter_id, result_value, conformity, image_drive_link]
+        test_results_sheet.append_row(new_row)
         return True
     except Exception as e:
-        st.error(f"Error appending to {worksheet_name}: {str(e)}")
+        st.error(f"❌ Error appending to Test_Results sheet: {str(e)}")
         return False
 
-def update_sheet_cell(sheet_name: str, worksheet_name: str, row: int, col: int, value: str) -> bool:
-    """Update a specific cell in a Google Sheet."""
+def get_test_results_for_sample(sample_id: str) -> List[Dict]:
+    """Fetch all test results for a given Sample_ID."""
     try:
-        if not gspread_client:
-            st.error("Google Sheets client not initialized")
-            return False
+        spreadsheet = get_spreadsheet()
+        test_results_sheet = spreadsheet.worksheet("Test_Results")
+        all_data = test_results_sheet.get_all_records()
         
-        sheet = gspread_client.open(sheet_name)
-        worksheet = sheet.worksheet(worksheet_name)
-        worksheet.update_cell(row, col, value)
-        return True
+        results = [row for row in all_data if row.get("Sample_ID") == sample_id]
+        return results
     except Exception as e:
-        st.error(f"Error updating cell in {worksheet_name}: {str(e)}")
-        return False
+        st.error(f"❌ Error fetching test results: {str(e)}")
+        return []
 
-# ============================================================================
-# GOOGLE DRIVE HELPER FUNCTIONS
-# ============================================================================
-
-def upload_image_to_drive(image_file, folder_id: str) -> Optional[str]:
-    """Upload an image file to Google Drive and return the shareable link."""
+def get_all_is_parameters() -> List[Dict]:
+    """Fetch all parameters from the IS_Parameters worksheet."""
     try:
-        if not drive_client:
-            st.error("Google Drive client not initialized")
+        spreadsheet = get_spreadsheet()
+        parameters_sheet = spreadsheet.worksheet("IS_Parameters")
+        all_data = parameters_sheet.get_all_records()
+        return all_data
+    except Exception as e:
+        st.error(f"❌ Error fetching all parameters: {str(e)}")
+        return []
+
+# ============================================================================
+# GOOGLE DRIVE OPERATIONS
+# ============================================================================
+
+def upload_image_to_drive(image_data: bytes, filename: str) -> Optional[str]:
+    """Upload an image to Google Drive and return the public sharing link."""
+    try:
+        drive_service = get_drive_service()
+        folder_id = st.secrets.get("drive_folder_id")
+        
+        if not folder_id:
+            st.warning("⚠️ Drive folder ID not configured. Image will not be saved.")
             return None
         
         file_metadata = {
-            'name': f"evidence_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg",
+            'name': filename,
             'parents': [folder_id]
         }
         
-        media = MediaIoBaseUpload(image_file, mimetype='image/jpeg', resumable=True)
-        file = drive_client.files().create(
+        media = MediaIoBaseUpload(io.BytesIO(image_data), mimetype='image/jpeg')
+        file = drive_service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id'
@@ -198,582 +330,575 @@ def upload_image_to_drive(image_file, folder_id: str) -> Optional[str]:
         
         file_id = file.get('id')
         
-        # Make file publicly accessible
-        drive_client.permissions().create(
+        # Make the file publicly accessible
+        drive_service.permissions().create(
             fileId=file_id,
             body={'type': 'anyone', 'role': 'reader'}
         ).execute()
         
-        public_url = f"https://drive.google.com/uc?id={file_id}&export=view"
-        return public_url
+        public_link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+        return public_link
     except Exception as e:
-        st.error(f"Error uploading image to Drive: {str(e)}")
+        st.error(f"❌ Error uploading image to Drive: {str(e)}")
         return None
 
 # ============================================================================
-# GEMINI API HELPER FUNCTIONS
+# GEMINI API OCR PARSING
 # ============================================================================
 
-def extract_data_from_pdf(pdf_file) -> Dict:
-    """Extract Sample_ID and IS_Code from PDF using Gemini API."""
+def parse_pdf_with_gemini(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Use Gemini API to extract Sample_ID and IS_Code from a PDF document.
+    Returns: (sample_id, is_code, raw_ocr_text)
+    """
     try:
-        if not gemini_model:
-            st.error("Gemini model not initialized")
-            return {}
+        initialize_gemini()
         
-        # Convert PDF to bytes
-        pdf_bytes = pdf_file.read()
+        # Convert PDF bytes to base64 for API
+        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
         
-        # Prepare prompt for extraction
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
         prompt = """
-        Analyze this laboratory test request PDF and extract the following information:
-        1. Sample ID (any identifier starting with 'S' or containing 'Sample')
-        2. IS Code (Indian Standard code like IS 5405, IS 1418, IS 2113)
-        3. Any additional relevant information
+        Please analyze this laboratory test request document and extract the following information:
+        1. Sample ID (any identifier like 'Sample-001', 'S-123', etc.)
+        2. IS Code (Indian Standard code like 'IS 5405', 'IS 1418', 'IS 2113', etc.)
         
-        Provide the response in JSON format with keys: sample_id, is_code, raw_text
+        Return the response in this exact format:
+        SAMPLE_ID: [extracted_id]
+        IS_CODE: [extracted_code]
+        
+        If any information is not found, write 'NOT_FOUND' for that field.
+        Also provide the complete raw OCR text of the document.
+        
+        RAW_OCR_TEXT:
+        [complete text of the document]
         """
         
-        # Use Gemini to process PDF content
-        response = gemini_model.generate_content([
-            prompt,
-            {"mime_type": "application/pdf", "data": pdf_bytes}
+        response = model.generate_content([
+            {
+                "mime_type": "application/pdf",
+                "data": pdf_base64
+            },
+            prompt
         ])
         
         response_text = response.text
         
-        # Parse response to extract structured data
-        extracted_data = {
-            "sample_id": extract_json_field(response_text, "sample_id"),
-            "is_code": extract_json_field(response_text, "is_code"),
-            "raw_ocr_text": response_text
-        }
+        # Parse the response
+        lines = response_text.split('\n')
+        sample_id = None
+        is_code = None
+        raw_ocr_text = response_text
         
-        return extracted_data
+        for line in lines:
+            if line.startswith("SAMPLE_ID:"):
+                sample_id = line.replace("SAMPLE_ID:", "").strip()
+                if sample_id.upper() == "NOT_FOUND":
+                    sample_id = None
+            elif line.startswith("IS_CODE:"):
+                is_code = line.replace("IS_CODE:", "").strip()
+                if is_code.upper() == "NOT_FOUND":
+                    is_code = None
+        
+        return sample_id, is_code, raw_ocr_text
     except Exception as e:
-        st.error(f"Error extracting data from PDF: {str(e)}")
-        return {}
-
-def extract_json_field(response_text: str, field_name: str) -> str:
-    """Helper function to extract JSON field from Gemini response."""
-    try:
-        import re
-        pattern = f'"{field_name}"\\s*:\\s*"([^"]*)"'
-        match = re.search(pattern, response_text)
-        if match:
-            return match.group(1)
-        return ""
-    except:
-        return ""
+        st.error(f"❌ Error parsing PDF with Gemini: {str(e)}")
+        return None, None, str(e)
 
 # ============================================================================
-# PDF GENERATION HELPER FUNCTIONS
+# PDF REPORT GENERATION
 # ============================================================================
 
-class LabReportPDF(FPDF):
-    """Custom PDF class for laboratory reports."""
+class RALReportPDF(FPDF):
+    """Custom PDF class for generating RAL laboratory reports."""
     
     def __init__(self):
         super().__init__()
         self.WIDTH = 210
         self.HEIGHT = 297
-    
+        
     def header(self):
-        """Add header to PDF."""
+        """Generate the PDF header with RAL branding."""
         self.set_font("Arial", "B", 20)
-        self.cell(0, 10, "REFERRAL ASSAY LABORATORY (RAL)", 0, 1, "C")
-        self.set_font("Arial", "I", 10)
-        self.cell(0, 5, "Laboratory Information Management System (LIMS)", 0, 1, "C")
-        self.cell(0, 5, "Professional Laboratory Report", 0, 1, "C")
+        self.cell(0, 10, "Referral Assay Laboratory (RAL)", 0, 1, "C")
+        
+        self.set_font("Arial", "", 10)
+        self.cell(0, 5, "Laboratory Information Management System (LIMS) Report", 0, 1, "C")
+        
+        self.set_font("Arial", "", 9)
+        self.cell(0, 5, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 0, 1, "C")
+        
+        self.ln(5)
+        self.line(10, self.get_y(), self.WIDTH - 10, self.get_y())
         self.ln(5)
     
     def footer(self):
-        """Add footer to PDF."""
+        """Generate the PDF footer."""
         self.set_y(-15)
         self.set_font("Arial", "I", 8)
         self.cell(0, 10, f"Page {self.page_no()}", 0, 0, "C")
     
-    def add_section_title(self, title: str):
-        """Add section title."""
+    def add_sample_section(self, sample_id: str, is_code: str):
+        """Add sample information section."""
         self.set_font("Arial", "B", 12)
-        self.cell(0, 8, title, 0, 1, "L")
-        self.ln(2)
-    
-    def add_info_row(self, label: str, value: str):
-        """Add information row."""
-        self.set_font("Arial", "", 10)
-        self.cell(60, 6, label, 0, 0, "L")
-        self.set_font("Arial", "B", 10)
-        self.cell(0, 6, str(value), 0, 1, "L")
-    
-    def add_table(self, headers: List[str], data: List[List[str]]):
-        """Add table to PDF."""
-        self.set_font("Arial", "B", 9)
-        col_width = self.WIDTH / len(headers)
+        self.cell(0, 8, "Sample Information", 0, 1)
         
-        # Header
-        for header in headers:
-            self.cell(col_width, 8, header, 1, 0, "C")
+        self.set_font("Arial", "", 10)
+        self.cell(50, 6, "Sample ID:")
+        self.cell(0, 6, sample_id, 0, 1)
+        
+        self.cell(50, 6, "IS Code:")
+        self.cell(0, 6, is_code, 0, 1)
+        
+        self.cell(50, 6, "Test Date:")
+        self.cell(0, 6, datetime.now().strftime('%Y-%m-%d'), 0, 1)
+        
+        self.ln(5)
+    
+    def add_results_table(self, results_data: List[Dict]):
+        """Add test results table to the PDF."""
+        self.set_font("Arial", "B", 12)
+        self.cell(0, 8, "Test Results", 0, 1)
+        
+        self.set_font("Arial", "B", 9)
+        self.set_fill_color(200, 220, 255)
+        
+        col_widths = [40, 50, 35, 35, 30]
+        headers = ["Parameter", "Test Name", "Limits", "Result", "Conformity"]
+        
+        for i, header in enumerate(headers):
+            self.cell(col_widths[i], 8, header, 1, 0, "C", fill=True)
         self.ln()
         
-        # Data rows
-        self.set_font("Arial", "", 8)
-        for row in data:
-            for i, cell in enumerate(row):
-                self.cell(col_width, 8, str(cell)[:20], 1, 0, "L")
+        self.set_font("Arial", "", 9)
+        for result in results_data:
+            parameter_id = result.get("Parameter_ID", "N/A")[:10]
+            test_name = str(result.get("Test_Name", "N/A"))[:30]
+            limits = str(result.get("Limits", "N/A"))[:20]
+            result_value = str(result.get("Result_Value", "N/A"))[:20]
+            conformity = result.get("Conformity", "N/A")[:15]
+            
+            self.cell(col_widths[0], 6, parameter_id, 1)
+            self.cell(col_widths[1], 6, test_name, 1)
+            self.cell(col_widths[2], 6, limits, 1)
+            self.cell(col_widths[3], 6, result_value, 1)
+            self.cell(col_widths[4], 6, conformity, 1)
             self.ln()
+        
+        self.ln(5)
+    
+    def add_footer_section(self):
+        """Add footer/certification section."""
+        self.set_font("Arial", "B", 10)
+        self.cell(0, 8, "Certification", 0, 1)
+        
+        self.set_font("Arial", "", 8)
+        footer_text = "This report has been generated by the RAL LIMS system. All test parameters comply with respective Indian Standards (IS codes). For detailed information, please contact the laboratory."
+        self.multi_cell(0, 4, footer_text)
 
-def generate_lab_report_pdf(sample_id: str, results_df: pd.DataFrame) -> bytes:
-    """Generate a professional laboratory report PDF."""
+def generate_pdf_report(sample_id: str, is_code: str, results_data: List[Dict]) -> Optional[bytes]:
+    """Generate a professional PDF laboratory report."""
     try:
-        pdf = LabReportPDF()
+        pdf = RALReportPDF()
         pdf.add_page()
         
-        # Sample Information Section
-        pdf.add_section_title("SAMPLE INFORMATION")
-        pdf.add_info_row("Sample ID:", sample_id)
-        pdf.add_info_row("Report Date:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        pdf.add_info_row("Laboratory:", "Referral Assay Laboratory (RAL)")
-        pdf.ln(3)
+        pdf.add_sample_section(sample_id, is_code)
+        pdf.add_results_table(results_data)
+        pdf.add_footer_section()
         
-        # Test Results Section
-        pdf.add_section_title("TEST RESULTS")
+        pdf_output = pdf.output(dest='S')
+        if isinstance(pdf_output, str):
+            pdf_output = pdf_output.encode('latin-1')
         
-        if len(results_df) > 0:
-            headers = ["Test Name", "Observed", "Limits", "Conformity"]
-            data = []
-            
-            for _, row in results_df.iterrows():
-                data.append([
-                    str(row.get("Test_Name", ""))[:20],
-                    str(row.get("Result_Value", ""))[:15],
-                    str(row.get("Limits", ""))[:15],
-                    str(row.get("Conformity", ""))[:15]
-                ])
-            
-            pdf.add_table(headers, data)
-        else:
-            pdf.set_font("Arial", "I", 10)
-            pdf.cell(0, 8, "No test results available", 0, 1, "L")
-        
-        pdf.ln(5)
-        
-        # Signature Section
-        pdf.add_section_title("CERTIFICATION")
-        pdf.set_font("Arial", "", 9)
-        pdf.multi_cell(0, 5, 
-            "This report certifies that the above mentioned samples have been tested "
-            "in accordance with the Indian Standards (IS) codes and the results are "
-            "accurate to the best of our knowledge and equipment capabilities.")
-        pdf.ln(10)
-        pdf.cell(0, 6, "_____________________", 0, 1, "L")
-        pdf.cell(0, 6, "Authorized Signature", 0, 1, "L")
-        
-        # Return PDF as bytes
-        return pdf.output(dest='S').encode('latin-1')
+        return pdf_output
     except Exception as e:
-        st.error(f"Error generating PDF: {str(e)}")
-        return b""
+        st.error(f"❌ Error generating PDF report: {str(e)}")
+        return None
 
 # ============================================================================
-# PAGE 1: NEW INTAKE (OCR / SCRAPING ENGINE)
+# PAGE: NEW INTAKE
 # ============================================================================
 
 def page_new_intake():
-    """Page for uploading and processing new test requests."""
-    st.title("🧪 New Intake - OCR Processing")
-    st.markdown("Upload a PDF test request to extract Sample ID and IS Code")
+    """PAGE 1: New Intake - OCR/Scraping Engine for Test Request PDFs"""
+    st.markdown('<div class="header-title">📄 New Intake</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subheader">Extract and Register New Test Requests</div>', unsafe_allow_html=True)
     
-    col1, col2 = st.columns([1, 1])
+    st.markdown("""
+    Upload a PDF test request document. The system will use AI (Gemini) to extract:
+    - **Sample ID**: Unique identifier for the sample
+    - **IS Code**: Indian Standard code (e.g., IS 5405, IS 1418, IS 2113)
+    """)
     
-    with col1:
-        st.subheader("Upload Test Request")
-        pdf_file = st.file_uploader(
-            "Upload PDF Test Request",
-            type=["pdf"],
-            help="Upload a laboratory test request PDF"
-        )
-    
-    with col2:
-        st.subheader("Extraction Status")
-        if pdf_file is not None:
-            st.info(f"File uploaded: {pdf_file.name}")
-    
-    if pdf_file is not None:
-        with st.spinner("Processing PDF with Gemini AI..."):
-            extracted_data = extract_data_from_pdf(pdf_file)
-        
-        if extracted_data:
-            st.success("Data extraction completed!")
-            
-            # Display extracted data for confirmation
-            st.subheader("Extracted Information")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                sample_id = st.text_input(
-                    "Sample ID",
-                    value=extracted_data.get("sample_id", ""),
-                    help="Unique identifier for the sample"
-                )
-            
-            with col2:
-                is_code = st.text_input(
-                    "IS Code",
-                    value=extracted_data.get("is_code", ""),
-                    help="Indian Standard code (e.g., IS 5405)"
-                )
-            
-            with st.expander("View Raw OCR Text"):
-                st.text_area(
-                    "Raw OCR Output",
-                    value=extracted_data.get("raw_ocr_text", ""),
-                    height=200,
-                    disabled=True
-                )
-            
-            # Confirmation and submission
-            st.subheader("Confirm and Submit")
-            
-            col1, col2, col3 = st.columns([1, 1, 1])
-            
-            with col2:
-                if st.button("Submit to Database", use_container_width=True):
-                    if not sample_id or not is_code:
-                        st.error("Please provide both Sample ID and IS Code")
-                    else:
-                        # Prepare data for submission
-                        submission_data = [
-                            sample_id,
-                            is_code,
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            extracted_data.get("raw_ocr_text", "")
-                        ]
-                        
-                        # Append to Google Sheet
-                        if append_to_sheet("RAL_LIMS", "Samples", submission_data):
-                            st.success(f"✅ Sample {sample_id} successfully added to database!")
-                            st.balloons()
-                            
-                            # Log the submission
-                            st.session_state.last_submitted_sample = sample_id
-                        else:
-                            st.error("Failed to submit sample to database")
-            
-            # Display last submitted sample
-            if "last_submitted_sample" in st.session_state:
-                st.info(f"Last submitted: {st.session_state.last_submitted_sample}")
-
-# ============================================================================
-# PAGE 2: LAB FLOOR (MOBILE TESTING UI)
-# ============================================================================
-
-def page_lab_floor():
-    """Page for laboratory testing on the lab floor."""
-    st.title("🔬 Lab Floor - Testing Interface")
-    st.markdown("Select a sample and record test results with evidence")
-    
-    # Fetch pending samples from Google Sheet
-    samples_df = get_sheet_data("RAL_LIMS", "Samples")
-    
-    if len(samples_df) == 0:
-        st.warning("No samples found in database. Please add samples via New Intake page.")
-        return
-    
-    # Sample selection
-    st.subheader("Select Sample")
-    sample_ids = samples_df["Sample_ID"].tolist()
-    selected_sample = st.selectbox(
-        "Available Samples",
-        options=sample_ids,
-        help="Select a sample to test"
+    uploaded_file = st.file_uploader(
+        "📤 Upload Test Request PDF",
+        type=["pdf"],
+        help="Select a PDF file containing the test request"
     )
     
-    if selected_sample:
-        # Get sample details
-        sample_row = samples_df[samples_df["Sample_ID"] == selected_sample].iloc[0]
-        is_code = sample_row.get("IS_Code", "")
+    if uploaded_file is not None:
+        st.info(f"✅ File selected: {uploaded_file.name}")
         
-        st.info(f"Selected Sample: **{selected_sample}** | IS Code: **{is_code}**")
+        # Read the PDF file
+        pdf_bytes = uploaded_file.read()
         
-        # Fetch test parameters for this IS code
-        params_df = get_sheet_data("RAL_LIMS", "IS_Parameters")
-        
-        if len(params_df) == 0:
-            st.error("No test parameters found in database.")
-            return
-        
-        # Filter parameters by IS code
-        relevant_params = params_df[params_df["IS_Code"] == is_code]
-        
-        if len(relevant_params) == 0:
-            st.warning(f"No test parameters found for IS Code: {is_code}")
-            return
-        
-        st.subheader(f"Tests for {is_code} ({len(relevant_params)} parameters)")
-        
-        # Create a form for each test parameter
-        with st.form(key="test_form", clear_on_submit=True):
-            test_results = []
+        if st.button("🔍 Parse Document with AI", key="parse_pdf"):
+            with st.spinner("🔄 Parsing PDF with Gemini API..."):
+                sample_id, is_code, raw_ocr_text = parse_pdf_with_gemini(pdf_bytes)
             
-            for idx, (_, param_row) in enumerate(relevant_params.iterrows()):
-                test_name = param_row.get("Test_Name", "")
-                parameter_id = param_row.get("Parameter_ID", "")
-                limits = param_row.get("Limits", "")
-                
-                st.markdown(f"### Test {idx + 1}: {test_name}")
-                
-                col1, col2 = st.columns([2, 1])
-                
-                with col1:
-                    st.text(f"Limits: {limits}")
-                    observed_result = st.text_input(
-                        "Observed Result",
-                        key=f"result_{idx}",
-                        placeholder="Enter measured value"
-                    )
-                
-                with col2:
-                    conformity = st.radio(
-                        "Conformity",
-                        options=["Conforms", "Does Not Conform", "N/A"],
-                        key=f"conformity_{idx}",
-                        horizontal=True
-                    )
-                
-                # Camera input for evidence
-                evidence_photo = st.camera_input(
-                    f"Capture Evidence - {test_name}",
-                    key=f"photo_{idx}"
-                )
-                
-                test_results.append({
-                    "parameter_id": parameter_id,
-                    "test_name": test_name,
-                    "observed_result": observed_result,
-                    "conformity": conformity,
-                    "evidence_photo": evidence_photo
-                })
-                
-                st.divider()
-            
-            # Submit button
-            submit_button = st.form_submit_button(
-                "Submit Test Results",
-                use_container_width=True
-            )
-            
-            if submit_button:
-                with st.spinner("Processing and uploading test results..."):
-                    all_valid = True
-                    
-                    for result in test_results:
-                        if not result["observed_result"]:
-                            st.error(f"Please enter result for {result['test_name']}")
-                            all_valid = False
-                    
-                    if not all_valid:
-                        st.error("Please fill in all required fields")
-                    else:
-                        # Process and save results
-                        success_count = 0
-                        
-                        for result in test_results:
-                            image_url = None
-                            
-                            # Upload evidence photo to Google Drive if captured
-                            if result["evidence_photo"] is not None:
-                                image_data = io.BytesIO()
-                                Image.open(result["evidence_photo"]).save(image_data, format='JPEG')
-                                image_data.seek(0)
-                                
-                                # Use a default folder ID (configure this in secrets)
-                                try:
-                                    folder_id = st.secrets.get("google_drive", {}).get("folder_id", "root")
-                                    image_url = upload_image_to_drive(image_data, folder_id)
-                                except:
-                                    image_url = "upload_pending"
-                            
-                            # Prepare result row for Google Sheet
-                            result_row = [
-                                f"RES_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                                selected_sample,
-                                result["parameter_id"],
-                                result["observed_result"],
-                                result["conformity"],
-                                image_url or "No image"
-                            ]
-                            
-                            # Append to Test_Results sheet
-                            if append_to_sheet("RAL_LIMS", "Test_Results", result_row):
-                                success_count += 1
-                        
-                        if success_count == len(test_results):
-                            st.success(f"✅ All {success_count} test results submitted successfully!")
-                            st.balloons()
-                        else:
-                            st.warning(f"Submitted {success_count}/{len(test_results)} results. Check errors above.")
-
-# ============================================================================
-# PAGE 3: REPORTS (PDF GENERATION)
-# ============================================================================
-
-def page_reports():
-    """Page for generating and downloading laboratory reports."""
-    st.title("📊 Reports - PDF Generation")
-    st.markdown("Generate professional laboratory reports for completed samples")
+            if sample_id and is_code:
+                st.session_state.parsed_sample_id = sample_id
+                st.session_state.parsed_is_code = is_code
+                st.session_state.parsed_raw_ocr = raw_ocr_text
+                st.session_state.show_confirmation = True
+            else:
+                st.markdown('<div class="error-box">❌ Could not extract required information. Please ensure the PDF contains Sample ID and IS Code.</div>', unsafe_allow_html=True)
     
-    # Fetch completed samples
-    results_df = get_sheet_data("RAL_LIMS", "Test_Results")
-    samples_df = get_sheet_data("RAL_LIMS", "Samples")
-    params_df = get_sheet_data("RAL_LIMS", "IS_Parameters")
-    
-    if len(results_df) == 0:
-        st.warning("No test results found. Please complete tests via Lab Floor page.")
-        return
-    
-    # Get unique sample IDs from results
-    sample_ids_with_results = results_df["Sample_ID"].unique().tolist()
-    
-    # Sample selection
-    st.subheader("Select Sample for Report")
-    selected_sample = st.selectbox(
-        "Completed Samples",
-        options=sample_ids_with_results,
-        help="Select a sample with completed tests"
-    )
-    
-    if selected_sample:
-        # Get sample details
-        sample_details = samples_df[samples_df["Sample_ID"] == selected_sample]
-        
-        if len(sample_details) > 0:
-            sample_info = sample_details.iloc[0]
-            st.info(f"Sample: {selected_sample} | IS Code: {sample_info.get('IS_Code', 'N/A')}")
-        
-        # Get test results for this sample
-        sample_results = results_df[results_df["Sample_ID"] == selected_sample].copy()
-        
-        # Join with parameters to get test names and limits
-        sample_results = sample_results.merge(
-            params_df,
-            left_on="Parameter_ID",
-            right_on="Parameter_ID",
-            how="left"
-        )
-        
-        st.subheader("Test Results Summary")
-        
-        # Display results in table
-        display_cols = ["Test_Name", "Result_Value", "Limits", "Conformity", "Image_Drive_Link"]
-        available_cols = [col for col in display_cols if col in sample_results.columns]
-        
-        if available_cols:
-            st.dataframe(
-                sample_results[available_cols],
-                use_container_width=True,
-                hide_index=True
-            )
-        
-        # Report generation section
-        st.subheader("Generate Official Report")
-        
-        col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            report_title = st.text_input(
-                "Report Title",
-                value=f"Laboratory Report - {selected_sample}",
-                help="Custom title for the report"
-            )
-        
-        with col2:
-            include_images = st.checkbox("Include Image Links in Report", value=True)
-        
-        # Generate button
-        if st.button("Generate Official Report", use_container_width=True):
-            with st.spinner("Generating PDF report..."):
-                pdf_bytes = generate_lab_report_pdf(selected_sample, sample_results)
-                
-                if pdf_bytes:
-                    st.success("✅ Report generated successfully!")
-                    
-                    # Download button
-                    st.download_button(
-                        label="📥 Download PDF Report",
-                        data=pdf_bytes,
-                        file_name=f"RAL_Report_{selected_sample}_{datetime.now().strftime('%Y%m%d')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                    
-                    # Display preview
-                    with st.expander("Preview Report"):
-                        st.info("PDF preview not available in browser. Please download to view.")
-                else:
-                    st.error("Failed to generate report. Check the data and try again.")
-        
-        # Additional report options
-        st.subheader("Report Management")
+    # Show confirmation form
+    if st.session_state.get("show_confirmation", False):
+        st.markdown("---")
+        st.markdown('<div class="info-box">✓ Document Parsed Successfully</div>', unsafe_allow_html=True)
         
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("View Raw Data", use_container_width=True):
-                with st.expander("Raw Test Data"):
-                    st.dataframe(sample_results, use_container_width=True)
+            sample_id_input = st.text_input(
+                "Sample ID",
+                value=st.session_state.parsed_sample_id,
+                help="Unique identifier for this sample"
+            )
         
         with col2:
-            if st.button("Export as CSV", use_container_width=True):
-                csv_data = sample_results.to_csv(index=False)
-                st.download_button(
-                    label="📊 Download CSV",
-                    data=csv_data,
-                    file_name=f"RAL_Data_{selected_sample}_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
+            is_code_input = st.text_input(
+                "IS Code",
+                value=st.session_state.parsed_is_code,
+                help="Indian Standard code (e.g., IS 5405)"
+            )
+        
+        with st.expander("📋 View Extracted Raw OCR Text"):
+            st.text_area(
+                "Raw OCR Text",
+                value=st.session_state.parsed_raw_ocr,
+                height=200,
+                disabled=True
+            )
+        
+        col1, col2, col3 = st.columns([1, 1, 2])
+        
+        with col1:
+            if st.button("✅ Submit", key="submit_intake"):
+                if not sample_id_input or not is_code_input:
+                    st.error("❌ Please fill in all required fields.")
+                else:
+                    success = append_to_samples_sheet(
+                        sample_id_input,
+                        is_code_input,
+                        st.session_state.parsed_raw_ocr
+                    )
+                    
+                    if success:
+                        st.markdown(f'<div class="success-box">✅ Sample "{sample_id_input}" successfully registered to the database!</div>', unsafe_allow_html=True)
+                        st.session_state.show_confirmation = False
+                        st.session_state.parsed_sample_id = None
+                        st.session_state.parsed_is_code = None
+                        st.session_state.parsed_raw_ocr = None
+                        st.balloons()
+                    else:
+                        st.markdown('<div class="error-box">❌ Failed to save to database. Please try again.</div>', unsafe_allow_html=True)
+        
+        with col2:
+            if st.button("❌ Cancel", key="cancel_intake"):
+                st.session_state.show_confirmation = False
+                st.rerun()
 
 # ============================================================================
-# MAIN APP ROUTING
+# PAGE: LAB FLOOR
+# ============================================================================
+
+def page_lab_floor():
+    """PAGE 2: Lab Floor - Mobile Testing UI for Recording Test Results"""
+    st.markdown('<div class="header-title">🧪 Lab Floor Testing</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subheader">Record Test Results and Capture Evidence</div>', unsafe_allow_html=True)
+    
+    # Fetch all pending samples
+    pending_samples = get_pending_samples()
+    
+    if not pending_samples:
+        st.warning("⚠️ No samples found in the database. Please add samples via 'New Intake' page.")
+        return
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        selected_sample = st.selectbox(
+            "Select Sample",
+            options=pending_samples,
+            help="Choose a sample to test"
+        )
+    
+    with col2:
+        if st.button("🔄 Refresh Samples", key="refresh_samples_lab"):
+            st.rerun()
+    
+    if selected_sample:
+        # Get IS_Code for the selected sample
+        is_code = get_sample_is_code(selected_sample)
+        
+        if not is_code:
+            st.error(f"❌ Could not find IS_Code for sample {selected_sample}")
+            return
+        
+        st.info(f"📍 Sample: **{selected_sample}** | IS Code: **{is_code}**")
+        
+        # Get parameters for this IS_Code
+        parameters = get_parameters_for_is_code(is_code)
+        
+        if not parameters:
+            st.warning(f"⚠️ No test parameters found for IS Code {is_code}. Please configure parameters in the database.")
+            return
+        
+        st.markdown(f"### Testing Parameters ({len(parameters)} tests)")
+        
+        # Initialize session state for test results form
+        if "test_results_form" not in st.session_state:
+            st.session_state.test_results_form = {}
+        
+        # Create forms for each parameter
+        for idx, param in enumerate(parameters):
+            param_id = param.get("Parameter_ID", f"PARAM_{idx}")
+            test_name = param.get("Test_Name", "Unknown Test")
+            limits = param.get("Limits", "N/A")
+            
+            with st.expander(f"✅ {test_name} (ID: {param_id})", expanded=(idx == 0)):
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    st.markdown(f"**Limits:** {limits}")
+                    result_value = st.text_input(
+                        "Observed Result",
+                        key=f"result_{param_id}",
+                        help="Enter the measured value"
+                    )
+                
+                with col2:
+                    conformity = st.radio(
+                        "Conformity Status",
+                        options=["Conforms", "Does Not Conform", "N/A"],
+                        key=f"conformity_{param_id}",
+                        horizontal=True
+                    )
+                
+                # Camera input for evidence
+                camera_image = st.camera_input(
+                    "📸 Capture Evidence",
+                    key=f"camera_{param_id}",
+                    help="Take a photo as evidence for this test"
+                )
+                
+                # Store form data in session state
+                st.session_state.test_results_form[param_id] = {
+                    "test_name": test_name,
+                    "limits": limits,
+                    "result_value": result_value,
+                    "conformity": conformity,
+                    "camera_image": camera_image
+                }
+        
+        st.markdown("---")
+        
+        if st.button("💾 Save All Test Results", key="save_lab_floor_results"):
+            all_saved = True
+            saved_count = 0
+            
+            with st.spinner("Saving test results..."):
+                for param_id, test_data in st.session_state.test_results_form.items():
+                    result_value = test_data.get("result_value", "")
+                    conformity = test_data.get("conformity", "N/A")
+                    camera_image = test_data.get("camera_image")
+                    
+                    # If no result value, skip this parameter
+                    if not result_value:
+                        continue
+                    
+                    image_drive_link = ""
+                    
+                    # Upload image to Drive if captured
+                    if camera_image is not None:
+                        # Convert camera image to bytes
+                        image_pil = Image.open(camera_image)
+                        image_byte_arr = io.BytesIO()
+                        image_pil.save(image_byte_arr, format='JPEG')
+                        image_byte_arr.seek(0)
+                        
+                        filename = f"{selected_sample}_{param_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                        image_drive_link = upload_image_to_drive(image_byte_arr.getvalue(), filename)
+                    
+                    # Generate Result_ID
+                    result_id = f"RES_{selected_sample}_{param_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                    
+                    # Append to Test_Results sheet
+                    success = append_to_test_results(
+                        result_id,
+                        selected_sample,
+                        param_id,
+                        result_value,
+                        conformity,
+                        image_drive_link if image_drive_link else ""
+                    )
+                    
+                    if success:
+                        saved_count += 1
+                    else:
+                        all_saved = False
+            
+            if all_saved and saved_count > 0:
+                st.markdown(f'<div class="success-box">✅ Successfully saved {saved_count} test results!</div>', unsafe_allow_html=True)
+                st.balloons()
+                # Clear session state
+                st.session_state.test_results_form = {}
+            elif saved_count > 0:
+                st.warning(f"⚠️ Saved {saved_count} test results but some entries failed.")
+            else:
+                st.warning("⚠️ No test results were saved. Please fill in at least one result value.")
+
+# ============================================================================
+# PAGE: REPORTS
+# ============================================================================
+
+def page_reports():
+    """PAGE 3: Reports - PDF Generation and Download"""
+    st.markdown('<div class="header-title">📊 Laboratory Reports</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subheader">Generate and Download Official Lab Reports</div>', unsafe_allow_html=True)
+    
+    # Fetch all samples that have test results
+    all_samples = get_pending_samples()
+    
+    if not all_samples:
+        st.warning("⚠️ No samples found. Please add samples via 'New Intake' page.")
+        return
+    
+    # Filter samples with completed tests
+    samples_with_results = []
+    for sample_id in all_samples:
+        results = get_test_results_for_sample(sample_id)
+        if results:
+            samples_with_results.append(sample_id)
+    
+    if not samples_with_results:
+        st.info("ℹ️ No completed tests found. Please record test results on the 'Lab Floor' page.")
+        return
+    
+    selected_sample = st.selectbox(
+        "Select a Sample to Generate Report",
+        options=samples_with_results,
+        help="Choose a completed sample"
+    )
+    
+    if selected_sample:
+        # Get sample details
+        is_code = get_sample_is_code(selected_sample)
+        
+        # Get test results
+        test_results_raw = get_test_results_for_sample(selected_sample)
+        
+        # Get all parameters for reference
+        all_parameters = get_all_is_parameters()
+        param_dict = {param.get("Parameter_ID"): param for param in all_parameters}
+        
+        # Merge test results with parameter information
+        test_results_merged = []
+        for result in test_results_raw:
+            param_id = result.get("Parameter_ID")
+            if param_id in param_dict:
+                merged = {**result, **param_dict[param_id]}
+                test_results_merged.append(merged)
+            else:
+                test_results_merged.append(result)
+        
+        # Display results in a table
+        st.markdown(f"### Sample: {selected_sample} | IS Code: {is_code}")
+        
+        if test_results_merged:
+            df_display = pd.DataFrame(test_results_merged)
+            
+            # Select relevant columns for display
+            display_columns = ["Parameter_ID", "Test_Name", "Limits", "Result_Value", "Conformity"]
+            available_columns = [col for col in display_columns if col in df_display.columns]
+            
+            st.dataframe(
+                df_display[available_columns],
+                use_container_width=True,
+                height=300
+            )
+            
+            st.markdown("---")
+            
+            # Generate PDF Report
+            if st.button("📄 Generate Official PDF Report", key="generate_pdf_report"):
+                with st.spinner("Generating PDF report..."):
+                    pdf_bytes = generate_pdf_report(selected_sample, is_code, test_results_merged)
+                
+                if pdf_bytes:
+                    st.markdown('<div class="success-box">✅ PDF Report Generated Successfully!</div>', unsafe_allow_html=True)
+                    
+                    st.download_button(
+                        label="⬇️ Download PDF Report",
+                        data=pdf_bytes,
+                        file_name=f"RAL_Report_{selected_sample}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf",
+                        key="download_pdf"
+                    )
+                else:
+                    st.markdown('<div class="error-box">❌ Failed to generate PDF report.</div>', unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ No test results found for this sample.")
+
+# ============================================================================
+# SIDEBAR NAVIGATION
 # ============================================================================
 
 def main():
-    """Main application entry point."""
+    """Main application with sidebar navigation."""
+    
+    # Initialize session state
+    if "show_confirmation" not in st.session_state:
+        st.session_state.show_confirmation = False
+    if "parsed_sample_id" not in st.session_state:
+        st.session_state.parsed_sample_id = None
+    if "parsed_is_code" not in st.session_state:
+        st.session_state.parsed_is_code = None
+    if "parsed_raw_ocr" not in st.session_state:
+        st.session_state.parsed_raw_ocr = None
+    if "test_results_form" not in st.session_state:
+        st.session_state.test_results_form = {}
     
     # Sidebar navigation
-    st.sidebar.title("🧪 RAL LIMS")
-    st.sidebar.markdown("---")
+    with st.sidebar:
+        st.markdown('<div style="text-align: center; font-size: 1.8rem; margin-bottom: 1rem;">🧪 RAL LIMS</div>', unsafe_allow_html=True)
+        st.markdown("### Navigation")
+        
+        page = st.radio(
+            "Select Page",
+            options=["New Intake", "Lab Floor", "Reports"],
+            label_visibility="collapsed"
+        )
+        
+        st.markdown("---")
+        
+        st.markdown("### System Information")
+        st.caption("**Application:** RAL LIMS v1.0")
+        st.caption("**Version:** Production Ready")
+        st.caption(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        
+        st.markdown("---")
+        
+        st.markdown("### Help & Support")
+        st.caption("For technical support, contact:")
+        st.caption("📧 admin@ral-lab.com")
+        st.caption("📞 +91-XXX-XXXXXXX")
     
-    page = st.sidebar.radio(
-        "Navigation",
-        options=["New Intake", "Lab Floor", "Reports"],
-        icons=["📥", "🔬", "📊"]
-    )
-    
-    st.sidebar.markdown("---")
-    
-    # Sidebar information
-    st.sidebar.subheader("System Information")
-    st.sidebar.text("Status: Online")
-    st.sidebar.text(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    
-    # Quick stats
-    with st.sidebar.expander("Database Stats"):
-        try:
-            samples_df = get_sheet_data("RAL_LIMS", "Samples")
-            results_df = get_sheet_data("RAL_LIMS", "Test_Results")
-            
-            st.metric("Total Samples", len(samples_df))
-            st.metric("Test Results", len(results_df))
-        except:
-            st.warning("Unable to fetch database stats")
-    
-    st.sidebar.markdown("---")
-    st.sidebar.caption("Referral Assay Laboratory LIMS v1.0")
-    
-    # Route to selected page
+    # Route to pages
     if page == "New Intake":
         page_new_intake()
     elif page == "Lab Floor":
