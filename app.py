@@ -6,7 +6,7 @@ TECH STACK:
 - Frontend: Streamlit (Mobile responsive)
 - Database: Google Sheets API (gspread and oauth2client)
 - Image Storage: Google Drive API (google-api-python-client)
-- Document Parsing/OCR: Gemini API (google-generativeai)
+- Document Parsing/OCR: Gemini API (google-genai)
 - PDF Generation: fpdf
 """
 
@@ -16,7 +16,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseUpload
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from fpdf import FPDF
 import json
 import io
@@ -164,14 +165,14 @@ def get_sheets_service():
 # GEMINI API INITIALIZATION
 # ============================================================================
 
-def initialize_gemini():
-    """Initialize Gemini API with the API key from Streamlit secrets."""
+def get_gemini_client():
+    """Initialize and return the Gemini API client."""
     try:
         gemini_api_key = st.secrets.get("gemini_api_key")
         if not gemini_api_key:
             st.error("❌ Gemini API key not found in secrets. Please configure .streamlit/secrets.toml")
             st.stop()
-        genai.configure(api_key=gemini_api_key)
+        return genai.Client(api_key=gemini_api_key)
     except Exception as e:
         st.error(f"❌ Failed to initialize Gemini API: {str(e)}")
         st.stop()
@@ -338,12 +339,7 @@ def parse_pdf_with_gemini(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[str
     Returns: (sample_id, is_code, raw_ocr_text)
     """
     try:
-        initialize_gemini()
-        
-        # Convert PDF bytes to base64 for API
-        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
-        
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        client = get_gemini_client()
         
         prompt = """
         Please analyze this laboratory test request document and extract the following information:
@@ -361,13 +357,16 @@ def parse_pdf_with_gemini(pdf_bytes: bytes) -> Tuple[Optional[str], Optional[str
         [complete text of the document]
         """
         
-        response = model.generate_content([
-            {
-                "mime_type": "application/pdf",
-                "data": pdf_base64
-            },
-            prompt
-        ])
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=[
+                types.Part.from_bytes(
+                    data=pdf_bytes,
+                    mime_type='application/pdf'
+                ),
+                prompt
+            ]
+        )
         
         response_text = response.text
         
