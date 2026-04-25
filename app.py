@@ -8,20 +8,6 @@ TECH STACK:
 - Image Storage: Google Drive API (google-api-python-client)
 - Document Parsing/OCR: Gemini API (google-generativeai)
 - PDF Generation: fpdf
-
-REQUIREMENTS.TXT:
-streamlit==1.28.1
-gspread==5.12.0
-oauth2client==4.1.3
-google-api-python-client==2.100.0
-google-auth==2.25.2
-google-auth-oauthlib==1.2.0
-google-auth-httplib2==0.2.0
-google-generativeai==0.3.0
-fpdf==1.7.2
-pdf2image==1.16.3
-python-dotenv==1.0.0
-Pillow==10.1.0
 """
 
 import streamlit as st
@@ -52,7 +38,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
     menu_items={
         "About": "Referral Assay Laboratory (RAL) - Laboratory Information Management System",
-        "Get Help": "Contact: admin@ral-lab.com"
+        "Get Help": "mailto:admin@ral-lab.com"
     }
 )
 
